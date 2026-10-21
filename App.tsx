@@ -68,6 +68,7 @@ function AppBody() {
               const name = await saveAudio(pending.uri, pending.meeting.id);
               saved = [{ ...pending.meeting, fileName: name, interrupted: true }, ...saved];
               await saveMeetings(saved);
+              await FS.deleteAsync(pending.uri, { idempotent: true });
               setBanner('중단된 녹음 파일을 복구했습니다. 재생해 확인해 주세요.');
             }
           }
@@ -119,7 +120,7 @@ function AppBody() {
         } catch (error) { updated.emailStatus = 'unknown'; throw error; }
         await upsert(updated);
       }
-      setBanner(updated.emailStatus === 'sent' ? '회의록 저장과 이메일 전송이 완료됐어요.' : '회의록이 저장됐어요.');
+      setBanner(updated.emailStatus === 'sent' ? '회의록 저장과 이메일 전송이 완료됐어요.' : autoEmail && !settings.recipients.length ? '회의록이 저장됐어요. 이메일을 보내려면 설정에서 수신자를 추가하세요.' : '회의록이 저장됐어요.');
     } catch (error) {
       updated.workflowError = errorText(error);
       await upsert(updated);
@@ -140,6 +141,7 @@ function AppBody() {
         const meeting = { ...captured, duration: seconds, fileName };
         await upsert(meeting);
         await pendingRecording(null);
+        await FS.deleteAsync(uri, { idempotent: true });
         active.current = null; setCurrent(null);
         setSelectedId(meeting.id); setTab('summary');
         await runWorkflow(meeting);
