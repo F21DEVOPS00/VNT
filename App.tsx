@@ -3,7 +3,7 @@ import { ActivityIndicator, Alert, AppState, Modal, Platform, Pressable, ScrollV
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { isRunningInExpoGo } from 'expo';
-import { AudioModule, RecordingPresets, setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus, useAudioRecorder, useAudioRecorderState } from 'expo-audio';
+import { AudioModule, RecordingPresets, setAudioModeAsync, useAudioRecorder, useAudioRecorderState } from 'expo-audio';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FS from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
@@ -11,6 +11,8 @@ import * as DocumentPicker from 'expo-document-picker';
 import { audioUri, getToken, loadMeetings, pendingRecording, removeAudio, saveAudio, saveMeetings, setToken, saveSession, clearSession } from './src/storage';
 import { sendEmail, summarize, transcribe } from './src/api';
 import { durationLabel, Meeting, meetingText } from './src/types';
+import { RecordingPlayback } from './src/RecordingPlayback';
+import { sampleSummary, sampleTranscript } from './src/sample';
 
 const colors = { ink: '#17233C', muted: '#7A8190', background: '#F8F7F3', line: '#E6E5DF', red: '#EC4D45', blue: '#294D78' };
 const dateLabel = (iso: string) => new Date(iso).toLocaleString('ko-KR', { month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
@@ -40,11 +42,21 @@ function AppBody() {
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [authStatus, setAuthStatus] = useState('');
+  const [showTestPreview, setShowTestPreview] = useState(true);
+  const [detailNotice, setDetailNotice] = useState('');
   const recorder = useAudioRecorder({ ...RecordingPresets.HIGH_QUALITY, sampleRate: 24000, bitRate: 48000, numberOfChannels: 1, directory: 'document', isMeteringEnabled: true });
   const state = useAudioRecorderState(recorder, 250);
-  const player = useAudioPlayer(null);
-  const playerState = useAudioPlayerStatus(player);
   const selected = meetings.find(m => m.id === selectedId);
+  const preview = !!selected && !selected.result && !selected.transcript && showTestPreview;
+  const visibleResult = selected?.result || (preview ? sampleSummary : undefined);
+
+  function openMeeting(id: string) {
+    setDetailNotice(''); setShowTestPreview(true); setSelectedId(id); setTab('summary');
+  }
+  async function returnToRecorder() {
+    await saveMeetings(all.current);
+    setSelectedId(null); setDetailNotice(''); setBanner('저장된 녹음은 목록에서 다시 열 수 있어요. 빨간 버튼으로 새 녹음을 시작하세요.');
+  }
 
   async function commit(next: Meeting[]) {
     await saveMeetings(next);
@@ -140,16 +152,17 @@ function AppBody() {
         const fileName = await saveAudio(uri, captured.id);
         const meeting = { ...captured, duration: seconds, fileName };
         await upsert(meeting);
-        await pendingRecording(null);
-        await FS.deleteAsync(uri, { idempotent: true });
         active.current = null; setCurrent(null);
-        setSelectedId(meeting.id); setTab('summary');
+        await pendingRecording(null);
+        // A cleanup failure must not leave a stopped recorder looking active.
+        try { if (uri !== audioUri(fileName)) await FS.deleteAsync(uri, { idempotent: true }); } catch { /* The saved copy is already durable. */ }
+        await setAudioModeAsync({ allowsRecording: false, allowsBackgroundRecording: false, playsInSilentMode: true, shouldPlayInBackground: false });
+        openMeeting(meeting.id);
         await runWorkflow(meeting);
       } else {
         if (Platform.OS === 'web') throw new Error('이 화면은 미리보기입니다. 실제 녹음은 아이폰 Expo Go에서 시작해 주세요.');
         const permission = await AudioModule.requestRecordingPermissionsAsync();
         if (!permission.granted) throw new Error('아이폰 설정에서 마이크 사용을 허용해 주세요.');
-        player.pause();
         await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true, allowsBackgroundRecording: !isRunningInExpoGo() });
         await recorder.prepareToRecordAsync();
         const meeting: Meeting = { id: `${Date.now()}`, title: `${new Date().toLocaleDateString('ko-KR')} 회의`, createdAt: new Date().toISOString(), duration: 0, transcript: '', notes: '', emailStatus: 'not-sent' };
@@ -164,7 +177,7 @@ function AppBody() {
   async function guarded(action: () => Promise<void>) {
     if (lock.current) return;
     lock.current = true; setBusy(true);
-    try { await action(); } catch (error) { setBanner(errorText(error)); }
+    try { await action(); } catch (error) { setBanner(errorText(error)); setDetailNotice(errorText(error)); }
     finally { lock.current = false; setBusy(false); }
   }
   async function storeSettings() {
@@ -187,8 +200,8 @@ function AppBody() {
     setAuthPassword(''); setAuthStatus(result.access_token ? '로그인됐습니다. 설정을 저장해 주세요.' : '가입 확인 이메일을 확인한 뒤 로그인해 주세요.');
   }
   function demo() {
-    const m: Meeting = { id: `demo-${Date.now()}`, title: '이번 주 매장 운영 회의 · 샘플', createdAt: new Date().toISOString(), duration: 824, transcript: '민수: 이번 주 토요일 오픈 전에 메뉴 사진을 교체합시다.\n지연: 제가 사진을 정리해서 금요일까지 전달하겠습니다.\n민수: 좋습니다. 새로운 근무표는 아직 확정하지 말고 다음 회의에서 논의해요.', notes: '', result: { title: '이번 주 매장 운영 회의 · 샘플', summary: '토요일 오픈 전 메뉴 사진을 교체하기로 했습니다. 새로운 근무표는 다음 회의에서 논의합니다.', decisions: ['토요일 오픈 전 메뉴 사진 교체'], actions: [{ task: '메뉴 사진 정리 및 전달', owner: '지연', due: '금요일' }], openQuestions: ['새로운 근무표 확정'] } };
-    guarded(async () => { await upsert(m); setSelectedId(m.id); setTab('summary'); });
+    const m: Meeting = { id: `demo-${Date.now()}`, title: '녹음 후 결과 화면 · 샘플', createdAt: new Date().toISOString(), duration: 0, transcript: '', notes: '' };
+    guarded(async () => { await upsert(m); openMeeting(m.id); });
   }
 
   return <SafeAreaView style={s.safe}><StatusBar style="dark" /><View style={s.top}><View><Text style={s.brand}>VNT<Text style={{ color: colors.red }}> ●</Text></Text><Text style={s.eyebrow}>VOICE NOTE TAKER</Text></View><Pressable accessibilityRole="button" accessibilityLabel="설정" onPress={() => setShowSettings(true)} disabled={busy || !!current} style={s.settings}><Text style={s.settingsLabel}>설정</Text></Pressable></View>
@@ -204,22 +217,28 @@ function AppBody() {
       </View>
       {!!banner && <View style={s.notice}><Text selectable style={s.noticeText}>{banner}</Text></View>}
       <View style={s.sectionRow}><Text style={s.sectionTitle}>내 회의록</Text><Text style={s.count}>{meetings.length}개</Text></View>
-      {meetings.length === 0 ? <View style={s.empty}><Text style={s.emptyTitle}>첫 번째 회의를 담아보세요.</Text><Text style={s.emptyText}>녹음 파일과 회의록이 여기에 차곡차곡 쌓여요.</Text><Button label="샘플 회의록 보기" onPress={demo} disabled={!ready || busy} /></View> : meetings.map(m => <Pressable key={m.id} disabled={busy || !!current} onPress={() => { player.pause(); setSelectedId(m.id); setTab('summary'); }} style={s.card}><View style={s.cardIcon}><Text style={{ color: colors.blue, fontSize: 22 }}>≋</Text></View><View style={{ flex: 1 }}><Text numberOfLines={1} style={s.cardTitle}>{m.title}</Text><Text style={s.cardMeta}>{dateLabel(m.createdAt)} · {durationLabel(m.duration)}</Text></View><Text style={[s.badge, { color: m.emailStatus === 'sent' ? '#39725B' : colors.muted }]}>{m.emailStatus === 'sent' ? '발송 완료' : m.result ? '회의록' : '녹음'}</Text></Pressable>)}
+      {meetings.length === 0 ? <View style={s.empty}><Text style={s.emptyTitle}>첫 번째 회의를 담아보세요.</Text><Text style={s.emptyText}>녹음 파일과 회의록이 여기에 차곡차곡 쌓여요.</Text><Button label="샘플 회의록 보기" onPress={demo} disabled={!ready || busy} /></View> : meetings.map(m => <Pressable key={m.id} disabled={busy || !!current} onPress={() => openMeeting(m.id)} style={s.card}><View style={s.cardIcon}><Text style={{ color: colors.blue, fontSize: 22 }}>≋</Text></View><View style={{ flex: 1 }}><Text numberOfLines={1} style={s.cardTitle}>{m.title}</Text><Text style={s.cardMeta}>{dateLabel(m.createdAt)} · {durationLabel(m.duration)}</Text></View><Text style={[s.badge, { color: m.emailStatus === 'sent' ? '#39725B' : colors.muted }]}>{m.emailStatus === 'sent' ? '발송 완료' : m.result ? '회의록' : '녹음'}</Text></Pressable>)}
+      {meetings.length > 0 && <Button label="녹음 후 화면 테스트" onPress={demo} disabled={!ready || busy || !!current} />}
       <Text style={s.footer}>작은 버튼 하나로, 대화가 기록이 됩니다.</Text>
     </ScrollView>
 
-    <Modal visible={!!selected && !current} animationType="slide" onRequestClose={() => { if (!busy) { player.pause(); setSelectedId(null); } }}><SafeAreaView style={s.safe}><View style={s.modalTop}><Button label="닫기" disabled={busy} onPress={() => { player.pause(); setSelectedId(null); }} /><Text style={s.eyebrow}>MEETING NOTES</Text><Button label="공유" disabled={busy} onPress={() => selected && guarded(async () => { await Share.share({ message: meetingText(selected) }); })} /></View>{selected && <ScrollView contentContainerStyle={s.detail} keyboardShouldPersistTaps="handled"><TextInput accessibilityLabel="회의 제목" style={s.detailHeading} value={selected.title} maxLength={200} editable={!busy} onChangeText={title => { const next = all.current.map(m => m.id === selected.id ? { ...m, title } : m); all.current = next; setMeetings(next); }} onBlur={() => guarded(() => saveMeetings(all.current))} /><Text style={s.cardMeta}>{dateLabel(selected.createdAt)} · {durationLabel(selected.duration)}{selected.interrupted ? ' · 중단 후 복구' : ''}</Text>
-        {selected.fileName && <View style={s.actions}><Button label={playerState.playing ? '재생 멈추기' : '녹음 듣기'} disabled={busy} onPress={() => guarded(async () => { if (playerState.playing) player.pause(); else { await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true }); player.replace(audioUri(selected.fileName!)); player.play(); } })} /><Button label="녹음 내보내기" disabled={busy} onPress={() => guarded(async () => { if (await Sharing.isAvailableAsync()) await Sharing.shareAsync(audioUri(selected.fileName!)); else throw new Error('이 기기에서 파일 공유를 지원하지 않습니다.'); })} /></View>}
-        <View style={s.tabs}>{(['summary', 'transcript', 'notes'] as const).map((key, i) => <Pressable key={key} onPress={() => setTab(key)} style={[s.tab, tab === key && s.activeTab]}><Text style={[s.tabText, tab === key && { color: colors.ink }]}>{['회의록', '받아쓰기', '내 메모'][i]}</Text></Pressable>)}</View>
-        {tab === 'summary' && (selected.result ? <><Text style={s.detailBody}>{selected.result.summary}</Text><Text style={s.detailLabel}>결정 사항</Text>{selected.result.decisions.map((text, i) => <Text key={i} style={s.bullet}>• {text}</Text>)}<Text style={s.detailLabel}>할 일</Text>{selected.result.actions.map((a, i) => <Pressable key={i} disabled={busy} onPress={() => guarded(async () => { const updated = { ...selected, result: { ...selected.result!, actions: selected.result!.actions.map((x, n) => n === i ? { ...x, done: !x.done } : x) } }; await upsert(updated); })} style={s.task}><Text style={s.taskBox}>{a.done ? '☑' : '☐'}</Text><View style={{ flex: 1 }}><Text style={[s.taskTitle, a.done && { textDecorationLine: 'line-through', opacity: 0.5 }]}>{a.task}</Text><Text style={s.cardMeta}>{a.owner || '담당자 미정'} · {a.due || '기한 미정'}</Text></View></Pressable>)}<Text style={s.detailLabel}>추가 확인</Text>{selected.result.openQuestions.map((q, i) => <Text key={i} style={s.bullet}>• {q}</Text>)}<Text style={s.privacy}>AI 결과는 원문과 비교해 확인해 주세요.</Text></> : <View style={s.empty}><Text style={s.emptyTitle}>녹음이 안전하게 저장됐어요.</Text><Text style={s.emptyText}>AI 연결 후 받아쓰기와 회의록을 만들 수 있어요.</Text></View>)}
-        {tab === 'transcript' && <Text selectable style={s.detailBody}>{selected.transcript || '아직 받아쓰기가 없습니다.'}</Text>}
-        {tab === 'notes' && <TextInput accessibilityLabel="내 메모" multiline placeholder="회의 중 떠오른 생각을 적어보세요." value={selected.notes} editable={!busy} style={s.notesInput} onChangeText={notes => { const next = all.current.map(m => m.id === selected.id ? { ...m, notes } : m); all.current = next; setMeetings(next); }} onBlur={() => guarded(() => saveMeetings(all.current))} />}
+    <Modal visible={!!selected && !current} animationType="slide" onRequestClose={() => { if (!busy) guarded(returnToRecorder); }}><SafeAreaView style={s.safe}><View style={s.modalTop}><Button label="← 녹음 목록" disabled={busy} onPress={() => guarded(returnToRecorder)} /><Text style={s.eyebrow}>MEETING NOTES</Text><Button label="공유" disabled={busy} onPress={() => selected && guarded(async () => { await Share.share({ message: meetingText(selected) }); })} /></View>{selected && <ScrollView contentContainerStyle={s.detail} keyboardShouldPersistTaps="handled"><TextInput accessibilityLabel="회의 제목" style={s.detailHeading} value={selected.title} maxLength={200} editable={!busy} onChangeText={title => { const next = all.current.map(m => m.id === selected.id ? { ...m, title } : m); all.current = next; setMeetings(next); }} onBlur={() => { saveMeetings(all.current).catch(error => setDetailNotice(errorText(error))); }} /><Text style={s.cardMeta}>{dateLabel(selected.createdAt)} · {durationLabel(selected.duration)}{selected.interrupted ? ' · 중단 후 복구' : ''}</Text>
+        {selected.fileName && <><RecordingPlayback key={selected.id} fileName={selected.fileName} disabled={busy} /><View style={s.actions}><Button label="녹음 내보내기" disabled={busy} onPress={() => guarded(async () => { if (await Sharing.isAvailableAsync()) await Sharing.shareAsync(audioUri(selected.fileName!)); else throw new Error('이 기기에서 파일 공유를 지원하지 않습니다.'); })} /></View></>}
+        {!selected.result && !selected.transcript && <View style={s.notice}><Text style={s.noticeText}>{selected.fileName ? '원본 녹음은 저장되어 있습니다. 실제 받아쓰기·요약은 AI 연결 후 만들 수 있어요.' : '화면 확인용 샘플입니다. 실제 녹음에서는 AI 연결 후 받아쓰기·요약을 만들 수 있어요.'}</Text><Button label={showTestPreview ? '테스트 예시 숨기기' : '테스트 예시 보기'} onPress={() => setShowTestPreview(!showTestPreview)} /></View>}
+        {preview && <View style={s.notice}><Text style={s.noticeText}>테스트 예시 · 아래 요약과 텍스트는 실제 녹음 내용을 분석한 결과가 아닙니다. 예시는 내 녹음에 저장되거나 이메일로 전송되지 않습니다.</Text></View>}
+        {selected.id.startsWith('demo-') && <Text style={s.noticeText}>샘플 회의 · 실제 녹음이 없는 화면 확인용 데이터입니다.</Text>}
+        <View style={s.tabs}>{(['summary', 'transcript', 'notes'] as const).map((key, i) => <Pressable key={key} onPress={() => setTab(key)} style={[s.tab, tab === key && s.activeTab]}><Text style={[s.tabText, tab === key && { color: colors.ink }]}>{['요약', '녹음 텍스트', '내 메모'][i]}</Text></Pressable>)}</View>
+        {tab === 'summary' && (visibleResult ? <><Text style={s.detailBody}>{visibleResult.summary}</Text><Text style={s.detailLabel}>결정 사항</Text>{visibleResult.decisions.map((text, i) => <Text key={i} style={s.bullet}>• {text}</Text>)}<Text style={s.detailLabel}>할 일</Text>{visibleResult.actions.map((a, i) => <Pressable key={i} disabled={busy || preview} onPress={() => guarded(async () => { const updated = { ...selected, result: { ...selected.result!, actions: selected.result!.actions.map((x, n) => n === i ? { ...x, done: !x.done } : x) } }; await upsert(updated); })} style={s.task}><Text style={s.taskBox}>{a.done ? '☑' : '☐'}</Text><View style={{ flex: 1 }}><Text style={[s.taskTitle, a.done && { textDecorationLine: 'line-through', opacity: 0.5 }]}>{a.task}</Text><Text style={s.cardMeta}>{a.owner || '담당자 미정'} · {a.due || '기한 미정'}</Text></View></Pressable>)}<Text style={s.detailLabel}>추가 확인</Text>{visibleResult.openQuestions.map((q, i) => <Text key={i} style={s.bullet}>• {q}</Text>)}<Text style={s.privacy}>{preview ? '화면 확인용 테스트 예시입니다.' : 'AI 결과는 원문과 비교해 확인해 주세요.'}</Text></> : <View style={s.empty}><Text style={s.emptyTitle}>녹음이 안전하게 저장됐어요.</Text><Text style={s.emptyText}>AI 연결 후 받아쓰기와 회의록을 만들 수 있어요.</Text></View>)}
+        {tab === 'transcript' && <Text selectable style={s.detailBody}>{selected.transcript || (preview ? sampleTranscript : '아직 실제 받아쓰기가 없습니다. AI 연결 후 이 녹음의 텍스트를 만들 수 있어요.')}</Text>}
+        {tab === 'notes' && <><Text style={s.emptyText}>직접 적는 메모입니다. 음성 받아쓰기는 ‘녹음 텍스트’에서 확인하세요.</Text><TextInput accessibilityLabel="내 메모" multiline placeholder="회의 중 떠오른 생각을 적어보세요." value={selected.notes} editable={!busy} style={s.notesInput} onChangeText={notes => { const next = all.current.map(m => m.id === selected.id ? { ...m, notes } : m); all.current = next; setMeetings(next); }} onBlur={() => { saveMeetings(all.current).catch(error => setDetailNotice(errorText(error))); }} /><Button label="메모 저장" disabled={busy} onPress={() => guarded(async () => { await saveMeetings(all.current); setDetailNotice('메모가 저장됐습니다.'); })} /></>}
+        {!!detailNotice && <Text accessibilityLiveRegion="polite" style={s.noticeText}>{detailNotice}</Text>}
         {!!stage && <Text style={s.stage}>{stage}</Text>}{!!selected.workflowError && <Text selectable style={s.noticeText}>{selected.workflowError}</Text>}
-        <View style={s.actions}><Button label={selected.result ? '이메일 보내기' : 'AI 회의록 만들기'} disabled={busy || !ready} onPress={() => {
+        <View style={s.actions}><Button label={selected.result ? '이메일 보내기' : 'AI 회의록 만들기'} disabled={busy || !ready || selected.id.startsWith('demo-')} onPress={() => {
           if (selected.result && (selected.emailStatus === 'sent' || selected.emailStatus === 'unknown' || selected.emailStatus === 'sending')) {
             Alert.alert('회의록 재전송', '수신함을 먼저 확인해 주세요. 다시 보내면 중복 메일이 도착할 수 있습니다.', [{ text: '취소', style: 'cancel' }, { text: '다시 보내기', onPress: () => guarded(() => runWorkflow({ ...selected, emailStatus: 'not-sent', emailAttempt: undefined }, true)) }]);
           } else guarded(() => runWorkflow(selected, true));
-        }} /><Button label="삭제" disabled={busy} onPress={() => Alert.alert('회의 삭제', '녹음과 회의록을 이 기기에서 삭제합니다.', [{ text: '취소', style: 'cancel' }, { text: '삭제', style: 'destructive', onPress: () => guarded(async () => { player.pause(); await removeAudio(selected.fileName); await commit(all.current.filter(m => m.id !== selected.id)); setSelectedId(null); }) }])} /></View>
+        }} /><Button label="삭제" disabled={busy} onPress={() => Alert.alert('회의 삭제', '녹음과 회의록을 이 기기에서 삭제합니다.', [{ text: '취소', style: 'cancel' }, { text: '삭제', style: 'destructive', onPress: () => guarded(async () => { setSelectedId(null); await removeAudio(selected.fileName); await commit(all.current.filter(m => m.id !== selected.id)); setSelectedId(null); }) }])} /></View>
+        <View style={s.actions}><Button label="← 녹음 목록으로" disabled={busy} onPress={() => guarded(returnToRecorder)} /><Button label="새 녹음 하러 가기" disabled={busy} onPress={() => guarded(returnToRecorder)} /></View>
       </ScrollView>}</SafeAreaView></Modal>
 
     <Modal visible={showSettings} animationType="slide" onRequestClose={() => { if (!busy) setShowSettings(false); }}><SafeAreaView style={s.safe}><View style={s.modalTop}><Text style={s.sectionTitle}>설정</Text><Button label="저장" disabled={busy} onPress={() => guarded(storeSettings)} /></View><ScrollView contentContainerStyle={s.detail} keyboardShouldPersistTaps="handled"><Text style={s.detailLabel}>회의록 받을 이메일</Text><Text style={s.emptyText}>여러 명에게 동시에 보낼 수 있어요. 최대 10명.</Text>{settings.recipients.map(email => <View style={s.recipient} key={email}><Text style={{ flex: 1, color: colors.ink }}>{email}</Text><Button label="제거" onPress={() => setSettings({ ...settings, recipients: settings.recipients.filter(x => x !== email) })} /></View>)}<TextInput accessibilityLabel="이메일 추가" placeholder="이메일 입력 · 쉼표로 여러 개 추가" keyboardType="email-address" autoCapitalize="none" value={recipientInput} onChangeText={setRecipientInput} style={s.input} /><View style={s.switchRow}><View style={{ flex: 1 }}><Text style={s.taskTitle}>녹음 종료 후 자동 이메일</Text><Text style={s.cardMeta}>AI 회의록이 완성되면 발송해요.</Text></View><Switch value={settings.automatic} onValueChange={automatic => setSettings({ ...settings, automatic })} trackColor={{ true: colors.red }} /></View>

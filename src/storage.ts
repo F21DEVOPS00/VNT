@@ -15,6 +15,8 @@ export async function saveAudio(uri: string, id: string) {
   const ext = uri.split('.').pop()?.split('?')[0] || 'm4a';
   const name = `${id}.${ext}`;
   await FS.copyAsync({ from: uri, to: audioUri(name) });
+  const saved = await FS.getInfoAsync(audioUri(name));
+  if (!saved.exists || !saved.size) throw new Error('녹음 파일 저장을 확인하지 못했습니다. 원본을 보존했으니 앱을 다시 열어 복구해 주세요.');
   return name;
 }
 export async function removeAudio(name?: string) {
