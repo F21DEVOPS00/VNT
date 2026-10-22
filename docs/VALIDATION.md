@@ -1,5 +1,8 @@
 # Validation — 2026-10-21
 
+- iPhone compatibility correction: aligned Expo/native modules to SDK 57, React Native 0.86.3 and React 19.2.3. App Store lists Expo Go 57.0.9; SDK 58 release notes say its store build is pending. Explicitly pin expo-asset and expo-constants to SDK 57 to prevent incompatible peer resolution. Typecheck, all 7 server tests and web export passed again after alignment.
+- Version sources: https://apps.apple.com/us/app/expo-go/id982107779 and https://expo.dev/changelog/sdk-58 (checked 2026-10-21).
+
 - Windows: TypeScript typecheck passed.
 - Server tests: 7 passed; fake AI and mail gateways only, no paid calls or real email.
 - Expo web export passed. Main screen, sample meeting summary, transcript and action item rendering checked in browser.
